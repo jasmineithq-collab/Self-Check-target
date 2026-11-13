@@ -8,11 +8,22 @@ from zoneinfo import ZoneInfo
 
 from mcp.server.fastmcp import FastMCP
 
+from logistics_data import LOGISTICS_SCHEMA, seed_inventory, seed_shipment
+from sql_guard import read_authorizer, read_query
 from staff_roster import load_roster
 
 
 SALES_TIMEZONE = ZoneInfo("Asia/Kuala_Lumpur")
 mcp = FastMCP("Sales targets")
+RETURNS_URI = "policy://logistics/returns"
+
+
+@mcp.resource(RETURNS_URI, mime_type="text/markdown")
+def return_guidelines() -> str:
+    """Read the sample returns policy from the bundled Markdown file."""
+    if os.environ["SALES_MODE"] != "demo":
+        return "An approved returns policy has not been configured for live mode."
+    return Path(__file__).with_name("return_guidelines.md").read_text(encoding="utf-8")
 
 # Reference schema for the data adapter. Amounts are stored in sen to keep
 # aggregation exact. Order dates are local calendar dates in YYYY-MM-DD format.
@@ -99,12 +110,14 @@ def split_amount(amount: int, weights: tuple[int, ...]) -> list[int]:
 
 
 def load_demo_roster():
-    return load_roster(os.environ.get("STAFF_ROSTER_XLSX_B64", ""), os.environ.get("STAFF_ROSTER_PATH", ""))
+    return load_roster(os.environ.get("STAFF_ROSTER_XLSX_B64", ""), os.environ.get("STAFF_ROSTER_PATH", ""),
+                       fixture=os.environ.get("SALES_EVAL_FIXTURE") == "1")
 
 
 def seed_demo(connection: sqlite3.Connection, today: date) -> None:
     roster = load_demo_roster()
-    connection.executescript(SCHEMA + DETAIL_SCHEMA)
+    connection.executescript(SCHEMA + DETAIL_SCHEMA + LOGISTICS_SCHEMA)
+    seed_inventory(connection, DEMO_AREAS, DEMO_ITEMS, today)
     connection.executemany(
         "INSERT INTO staff VALUES (?, ?, ?, ?, ?, 1)",
         [
@@ -151,6 +164,8 @@ def seed_demo(connection: sqlite3.Connection, today: date) -> None:
                     (order_id, area, f"{area} {DEMO_CUSTOMERS[(order - 1) % len(DEMO_CUSTOMERS)]} (Demo)",
                      invoice, pod_status, f"POD-{reference}" if pod_status == "Delivered" else None),
                 )
+                if invoice:
+                    seed_shipment(connection, order_id, reference, pod_status, order_date, today, amount)
                 line_amounts = split_amount(amount, (5, 3, 2) if order % 2 else (3, 2))
                 connection.executemany(
                     "INSERT INTO order_items VALUES (?, ?, ?, ?, ?)",
@@ -164,11 +179,16 @@ def open_sales_database(mode: str, today: date) -> sqlite3.Connection:
     if mode == "demo":
         connection = sqlite3.connect(":memory:")
         seed_demo(connection, today)
+        connection.execute("PRAGMA query_only = ON")
+        connection.set_authorizer(read_authorizer)
         return connection
     if mode != "live":
         raise ValueError("Invalid sales mode")
     path = Path(os.environ["SALES_DB_PATH"]).expanduser().resolve()
-    return sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+    connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+    connection.execute("PRAGMA query_only = ON")
+    connection.set_authorizer(read_authorizer)
+    return connection
 
 
 def load_snapshot(
@@ -182,7 +202,7 @@ def load_snapshot(
 
     connection.row_factory = sqlite3.Row
     connection.execute("BEGIN")
-    staff = connection.execute(
+    staff = read_query(connection,
         "SELECT staff_id, name, role FROM staff WHERE email = ? AND active = 1", (email,)
     ).fetchone()
     if staff is None or (username and staff["staff_id"].upper() != username):
@@ -191,7 +211,7 @@ def load_snapshot(
     if not include_data:
         return profile
 
-    tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    tables = {row[0] for row in read_query(connection, "SELECT name FROM sqlite_master WHERE type = 'table'")}
     has_details = {"staff_areas", "order_details", "order_items"} <= tables
     if not has_details:
         # Previous snapshots support totals, but cannot enforce an area assignment.
@@ -214,7 +234,7 @@ def load_snapshot(
               ))
         )
     """
-    rows = connection.execute(
+    rows = read_query(connection,
         scope + """
         , order_totals AS (
             SELECT staff_id, SUM(amount_sen) AS ordered_sen, COUNT(*) AS order_count
@@ -231,10 +251,10 @@ def load_snapshot(
         """,
         params,
     ).fetchall()
-    orders = connection.execute(
+    orders = read_query(connection,
         scope + "SELECT * FROM visible_orders ORDER BY order_date DESC, order_id", params
     ).fetchall()
-    items = connection.execute(
+    items = read_query(connection,
         scope + """
         SELECT o.order_id, o.name, o.staff_id, o.area, o.customer, o.invoice, o.status, o.order_date,
                i.item_category, i.item_name, COALESCE(i.amount_sen, o.amount_sen) AS amount_sen
@@ -242,7 +262,8 @@ def load_snapshot(
         ORDER BY o.order_date DESC, o.order_id, i.line_number
         """, params,
     ).fetchall()
-    sync = connection.execute("SELECT updated_at FROM sales_sync WHERE id = 1").fetchone()
+    sync = read_query(connection, "SELECT updated_at FROM sales_sync WHERE id = 1").fetchone()
+    logistics = load_logistics(connection, scope, params, tables)
     return {
         **profile,
         "through": (cutoff - timedelta(days=1)).isoformat(),
@@ -250,7 +271,21 @@ def load_snapshot(
         "rows": [dict(row) for row in rows],
         "orders": [dict(row) for row in orders],
         "items": [dict(row) for row in items],
+        **logistics,
     }
+
+
+def load_logistics(connection, scope, params, tables):
+    queries = {
+        "shipments": "SELECT s.*, o.invoice FROM shipments s JOIN visible_orders o USING (order_id)",
+        "shipment_events": "SELECT e.* FROM shipment_events e JOIN visible_orders o USING (order_id) ORDER BY sequence",
+        "order_refunds": "SELECT r.*, o.invoice FROM order_refunds r JOIN visible_orders o USING (order_id)",
+        "area_inventory": """SELECT i.*, i.on_hand - i.reserved AS available FROM area_inventory i
+            WHERE EXISTS (SELECT 1 FROM staff_areas a JOIN visible_staff USING (staff_id) WHERE a.area = i.area)
+            ORDER BY i.area, i.sku""",
+    }
+    return {table: [dict(row) for row in read_query(connection, scope + query, params)]
+            for table, query in queries.items() if table in tables}
 
 
 @mcp.tool()

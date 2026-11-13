@@ -18,9 +18,9 @@ class Staff:
     manager_code: str | None = None
 
 
-def load_roster(encoded: str = "", path: str = "") -> dict[str, Staff]:
+def load_roster(encoded: str = "", path: str = "", *, fixture: bool = False) -> dict[str, Staff]:
     source = Path(path).expanduser() if path else DEFAULT_ROSTER
-    if not encoded and not path and not source.is_file():
+    if fixture or (not encoded and not path and not source.is_file()):
         demo = (
             Staff("DSM001", "Mei Tan"), Staff("DSM002", "Farah Noor"),
             Staff("REP001", "Aina Rahman", "DSM001"), Staff("REP002", "Daniel Lim", "DSM001"),

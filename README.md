@@ -65,8 +65,29 @@ After signing in, type a question in **Ask an assistant**. You can ask follow-up
 - **HR** explains the sample commission policy and calculates the example amount for the visible salesperson or team. Live mode requires an approved policy before calculating commission.
 - **Logistics** looks up POD status and reference by invoice number within the selected month and the user's access scope.
 
+The sidebar's **Suggested Questions** submit through the same chat and staff checks as typed questions. Ask Logistics for shipment milestones by invoice, order or tracking ID, current inventory by SKU or item, refunds, or return guidelines. The demo policy and records are fictional. A live snapshot can add the `shipments`, `shipment_events`, `order_refunds`, and `area_inventory` tables defined in `logistics_data.py`. Order-related records follow the selected month. Inventory is current for the viewer's areas. Live return policy requires an approved policy source.
+
 Ask “How much is this invoice and has it been delivered?” with a visible invoice number to get the Sales and Logistics results together.
 
 ### ADK coordinator
 
 Set `GOOGLE_API_KEY` in Streamlit Secrets to enable chat. The ADK coordinator uses `gemini-3.5-flash` by default. Set `GEMINI_MODEL` to override it. The coordinator chooses specialists based on the question, can consult more than one, and synthesizes their findings. The app shows actual tool results under **Sources**. Questions outside the supported topics get a scope message. Gemini receives the question, recent chat context, and scoped data returned by specialist tools. The tools use the authorized SQLite data loaded over MCP and have read-only access. [Gemini 3.5 Flash documentation](https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash)
+
+## Six-pillar checklist
+
+| Pillar | Implementation |
+| --- | --- |
+| 1. Agents | ADK coordinator with Sales, HR, and Logistics specialists. Logistics covers shipments, POD, inventory, refunds and returns. |
+| 2. MCP integration | The client discovers `get_sales_progress` with `tools/list` and retrieves the Markdown policy with `resources/list` and `resources/read`. The server uses parameterized SQLite queries scoped to the signed-in staff member. |
+| 3. Guardrails | Input checks block known injection patterns and mask common personal identifiers before chat storage or model calls. SQLGlot verifies the SQLite AST in `is_sql_mutation`. Live SQLite uses `mode=ro`, and all data connections use `query_only` and a SQLite authorizer. |
+| 4. Observability | `after_model_callback` emits `model_usage` JSON lines in Streamlit logs for the coordinator and specialists. Each line includes a request ID, model, token counts, and the estimated standard paid-tier USD cost when pricing and usage are available. It excludes prompts and record content. |
+| 5. Evaluation | `evaluate_logistics.py` runs four golden cases through MCP and ADK and grades factual accuracy with Gemini. A missing expected source or failed judgment makes the command exit nonzero. |
+| 6. Deployment | `app.py` and `requirements.txt` deploy from GitHub `main` with Python 3.12. Configure the key through Streamlit Secrets. |
+
+The token estimate uses the Gemini 3.5 Flash standard Developer API rates, including the separate rate for cached input and the output rate for thinking tokens. Overrides without a rate entry log token counts with a null USD estimate. [Gemini API pricing](https://ai.google.dev/gemini-api/docs/pricing)
+
+Run the golden evaluation locally with `GOOGLE_API_KEY` in your environment or local `.streamlit/secrets.toml`. Optionally set `EVAL_JUDGE_MODEL` to choose the judge model.
+
+```bash
+python evaluate_logistics.py
+```

@@ -13,8 +13,21 @@ UNSAFE_REQUEST = re.compile(
 ORDER_REF = re.compile(r"\bSO(?:[-/][A-Z0-9]+|\d[A-Z0-9]*)(?:[-/][A-Z0-9]+)*\b", re.IGNORECASE)
 INVOICE_REF = re.compile(r"\bINV(?:[-/][A-Z0-9]+|\d[A-Z0-9]*)(?:[-/][A-Z0-9]+)*\b", re.IGNORECASE)
 INVOICE_NUMBER = re.compile(r"\b(?:invoice|inv|invois)\s*(?:#|no\.?\s*)?([A-Z0-9/_-]*\d[A-Z0-9/_-]*)\b", re.IGNORECASE)
-OUT_OF_SCOPE = "That question is outside the supported topics. Ask about HR commission, sales orders, sales invoices, or invoice delivery and POD."
+OUT_OF_SCOPE = "That question is outside the supported topics. Ask about commission, sales, shipments and POD, stock, refunds, or returns."
 UNRELATED_TASK = re.compile(r"\b(?:write|compose|tell|generate)\b.{0,35}\b(?:poem|joke|song|story)\b|\b(?:court orders?|target shooting|commission a painting)\b", re.IGNORECASE)
+PII = (
+    (re.compile(r"\b[\w.+-]+@[\w.-]+\.[a-z]{2,}\b", re.IGNORECASE), "[email redacted]"),
+    (re.compile(r"(?<![\w-])\d{6}[- ]\d{2}[- ]\d{4}(?![\w-])"), "[ID redacted]"),
+    (re.compile(r"(?<![\w-])(?:\d[ -]?){12,18}\d(?![\w-])"), "[number redacted]"),
+    (re.compile(r"(?<![\w-])(?:\+?60[ -]?1\d|01\d)[ -]?\d{3,4}[ -]?\d{4}(?![\w-])"), "[phone redacted]"),
+    (re.compile(r"\b(?:recipient|address|passport|national ID|NRIC)\s*[:=]\s*[^\n;,.!?]+", re.IGNORECASE), "[personal detail redacted]"),
+)
+
+
+def mask_pii(text: str) -> str:
+    for pattern, replacement in PII:
+        text = pattern.sub(replacement, text)
+    return text
 
 
 def guardrail_message(question: str) -> str:
@@ -22,7 +35,10 @@ def guardrail_message(question: str) -> str:
     question = " ".join(question.split())
     if not question or len(question) > 500:
         return "Enter a question up to 500 characters."
-    if UNSAFE_REQUEST.search(question):
+    if UNSAFE_REQUEST.search(question) or re.search(
+        r"<\/?(?:system|developer|assistant)>|\[/?INST\]|\b(?:jailbreak|disregard previous|developer mode)\b",
+        question, re.IGNORECASE,
+    ):
         return "This request is outside the assistant's read-only access. Ask about visible orders, commission policy, or an invoice POD."
     if UNRELATED_TASK.search(question):
         return OUT_OF_SCOPE

@@ -11,9 +11,9 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from streamlit.errors import StreamlitSecretNotFoundError
 
-from mcp_db_server import SALES_TIMEZONE
+from mcp_db_server import RETURNS_URI, SALES_TIMEZONE
 from staff_roster import CODE_PATTERN, load_roster
-from sales_assistants import guardrail_message
+from sales_assistants import guardrail_message, mask_pii
 
 
 LOGGER = logging.getLogger(__name__)
@@ -83,9 +83,12 @@ def viewer_email(mode: str, code: str) -> str:
     return email.strip().casefold()
 
 
-async def fetch_snapshot(mode: str, email: str, code: str, month: date, include_data: bool) -> dict:
+async def fetch_snapshot(mode: str, email: str, code: str, month: date, include_data: bool,
+                         include_policy: bool = False, *, evaluation: bool = False) -> dict:
     env = {"SALES_MODE": mode, "SALES_VIEWER_EMAIL": email, "SALES_VIEWER_USERNAME": code}
-    if mode == "demo":
+    if mode == "demo" and evaluation:
+        env["SALES_EVAL_FIXTURE"] = "1"
+    elif mode == "demo":
         for name in ("STAFF_ROSTER_XLSX_B64", "STAFF_ROSTER_PATH"):
             if value := setting(name):
                 env[name] = value
@@ -102,12 +105,22 @@ async def fetch_snapshot(mode: str, email: str, code: str, month: date, include_
         async with stdio_client(params) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
+                tools = await session.list_tools()
+                if "get_sales_progress" not in {tool.name for tool in tools.tools}:
+                    raise RuntimeError("Required MCP tool is unavailable")
                 result = await session.call_tool(
                     "get_sales_progress", {"month_start": month.isoformat(), "include_data": include_data}
                 )
-    if result.isError or result.structuredContent is None:
-        raise RuntimeError("Sales progress tool failed")
-    return result.structuredContent
+                if result.isError or result.structuredContent is None:
+                    raise RuntimeError("Sales progress tool failed")
+                snapshot = result.structuredContent
+                if include_policy and snapshot.get("authorized"):
+                    resources = await session.list_resources()
+                    resource = next((item for item in resources.resources if str(item.uri) == RETURNS_URI), None)
+                    if resource:
+                        policy = await session.read_resource(resource.uri)
+                        snapshot["return_policy"] = "\n".join(part.text for part in policy.contents if hasattr(part, "text"))
+                return snapshot
 
 
 def money(sen: int | None) -> str:
@@ -208,9 +221,28 @@ def submit_question(scope: tuple) -> None:
     st.session_state["sales_pending_question"] = (scope, question)
 
 
+def suggested_questions(scope: tuple) -> None:
+    st.sidebar.subheader("Suggested Questions")
+    for question in (
+        "Which invoices have been delivered?",
+        "Which deliveries have exceptions or pending POD?",
+        "Show the stock available in my area.",
+        "Which orders have refunds in progress?",
+        "What is the return window for damaged items?",
+        "How am I tracking against my sales target?",
+        "How is commission calculated?",
+    ):
+        st.sidebar.button(question, key=f"suggestion:{question}", width="stretch",
+                          on_click=queue_suggestion, args=(scope, question))
+
+
+def queue_suggestion(scope: tuple, question: str) -> None:
+    st.session_state["sales_pending_question"] = (scope, question)
+
+
 def display_chat(scope: tuple, history: list[dict]) -> None:
     st.subheader("Ask an assistant")
-    st.caption("Ask about commission, sales orders, invoice amounts, or delivery and POD.")
+    st.caption("Ask about shipments and POD, stock, refunds, returns, sales, or commission.")
     st.toggle("Show all", key="sales_show_all", help="Show the full dashboard for the selected month.")
     for entry in history:
         render_message(entry)
@@ -283,13 +315,14 @@ def main() -> None:
     pending_scope, pending_question = st.session_state.pop("sales_pending_question", (None, ""))
     question = pending_question if pending_scope == scope else ""
     blocked = guardrail_message(question) if question else ""
+    question = mask_pii(question)
     api_key = setting("GOOGLE_API_KEY")
     show_all = st.session_state.get("sales_show_all", False)
     include_data = bool(show_all or (question and api_key and not blocked))
 
     try:
         with st.spinner("Loading figures…" if include_data else "Checking staff access…"):
-            snapshot = asyncio.run(fetch_snapshot(mode, email, code, month, include_data))
+            snapshot = asyncio.run(fetch_snapshot(mode, email, code, month, include_data, bool(question and not blocked and api_key)))
     except Exception as error:
         LOGGER.warning("Sales figures could not load (%s)", type(error).__name__)
         st.error("Sales figures are unavailable. Try refreshing or contact your administrator.")
@@ -300,14 +333,15 @@ def main() -> None:
         st.stop()
     display_chat(scope, history)
     if question:
-        user_entry = {"role": "user", "text": question}
+        user_entry = {"role": "user", "text": question, "blocked": bool(blocked)}
         render_message(user_entry)
         answer, evidence = agent_reply(question, history, snapshot, month, mode, api_key, blocked)
-        assistant_entry = {"role": "assistant", "text": answer, "evidence": evidence}
+        assistant_entry = {"role": "assistant", "text": answer, "evidence": evidence, "blocked": bool(blocked)}
         render_message(assistant_entry)
         history = [*history, user_entry, assistant_entry][-20:]
         st.session_state["sales_chat"] = (scope, history)
     st.sidebar.button("Clear chat history", on_click=clear_chat_history, width="stretch", disabled=not history)
+    suggested_questions(scope)
     manager = snapshot.get("role") == "sales_manager"
     if snapshot.get("name"):
         st.sidebar.text(snapshot["name"])
