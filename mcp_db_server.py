@@ -98,8 +98,12 @@ def split_amount(amount: int, weights: tuple[int, ...]) -> list[int]:
     return parts
 
 
+def load_demo_roster():
+    return load_roster(os.environ.get("STAFF_ROSTER_XLSX_B64", ""), os.environ.get("STAFF_ROSTER_PATH", ""))
+
+
 def seed_demo(connection: sqlite3.Connection, today: date) -> None:
-    roster = load_roster(os.environ.get("STAFF_ROSTER_XLSX_B64", ""), os.environ.get("STAFF_ROSTER_PATH", ""))
+    roster = load_demo_roster()
     connection.executescript(SCHEMA + DETAIL_SCHEMA)
     connection.executemany(
         "INSERT INTO staff VALUES (?, ?, ?, ?, ?, 1)",
@@ -168,7 +172,8 @@ def open_sales_database(mode: str, today: date) -> sqlite3.Connection:
 
 
 def load_snapshot(
-    connection: sqlite3.Connection, email: str, month: date, today: date, username: str = ""
+    connection: sqlite3.Connection, email: str, month: date, today: date, username: str = "",
+    include_data: bool = True,
 ) -> dict[str, Any]:
     if month.day != 1 or month > today:
         raise ValueError("Expected the first day of a current or past month")
@@ -182,6 +187,9 @@ def load_snapshot(
     ).fetchone()
     if staff is None or (username and staff["staff_id"].upper() != username):
         return {"authorized": False}
+    profile = {"authorized": True, "name": staff["name"], "role": staff["role"]}
+    if not include_data:
+        return profile
 
     tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     has_details = {"staff_areas", "order_details", "order_items"} <= tables
@@ -236,9 +244,7 @@ def load_snapshot(
     ).fetchall()
     sync = connection.execute("SELECT updated_at FROM sales_sync WHERE id = 1").fetchone()
     return {
-        "authorized": True,
-        "name": staff["name"],
-        "role": staff["role"],
+        **profile,
         "through": (cutoff - timedelta(days=1)).isoformat(),
         "source_updated_at": sync["updated_at"] if sync else None,
         "rows": [dict(row) for row in rows],
@@ -248,15 +254,21 @@ def load_snapshot(
 
 
 @mcp.tool()
-def get_sales_progress(month_start: str) -> dict[str, Any]:
-    """Read targets and confirmed order totals for the current verified viewer."""
+def get_sales_progress(month_start: str, include_data: bool = True) -> dict[str, Any]:
+    """Validate the viewer and optionally read their scoped targets and orders."""
     # Streamlit binds these values when it launches this private stdio process.
     email = os.environ["SALES_VIEWER_EMAIL"].strip().casefold()
     username = os.environ.get("SALES_VIEWER_USERNAME", "")
     mode = os.environ["SALES_MODE"]
+    if mode == "demo" and not include_data:
+        staff = load_demo_roster().get(username)
+        if staff is None or email != f"{staff.code.lower()}@example.test":
+            return {"authorized": False}
+        role = "salesperson" if staff.manager_code else "sales_manager"
+        return {"authorized": True, "name": staff.name, "role": role}
     today = datetime.now(SALES_TIMEZONE).date()
     with closing(open_sales_database(mode, today)) as connection:
-        return load_snapshot(connection, email, date.fromisoformat(month_start), today, username)
+        return load_snapshot(connection, email, date.fromisoformat(month_start), today, username, include_data)
 
 
 if __name__ == "__main__":

@@ -33,6 +33,9 @@ def staff_code(mode: str) -> str:
     if code:
         if st.sidebar.button("Switch user", width="stretch"):
             del st.session_state["sales_staff_code"]
+            st.session_state.pop("sales_request", None)
+            st.session_state.pop("sales_request_submitted", None)
+            st.session_state.pop("sales_show_all", None)
             st.rerun()
         return code
 
@@ -77,7 +80,7 @@ def viewer_email(mode: str, code: str) -> str:
     return email.strip().casefold()
 
 
-async def fetch_snapshot(mode: str, email: str, code: str, month: date) -> dict:
+async def fetch_snapshot(mode: str, email: str, code: str, month: date, include_data: bool) -> dict:
     env = {"SALES_MODE": mode, "SALES_VIEWER_EMAIL": email, "SALES_VIEWER_USERNAME": code}
     if mode == "demo":
         for name in ("STAFF_ROSTER_XLSX_B64", "STAFF_ROSTER_PATH"):
@@ -96,7 +99,9 @@ async def fetch_snapshot(mode: str, email: str, code: str, month: date) -> dict:
         async with stdio_client(params) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
-                result = await session.call_tool("get_sales_progress", {"month_start": month.isoformat()})
+                result = await session.call_tool(
+                    "get_sales_progress", {"month_start": month.isoformat(), "include_data": include_data}
+                )
     if result.isError or result.structuredContent is None:
         raise RuntimeError("Sales progress tool failed")
     return result.structuredContent
@@ -114,19 +119,35 @@ def attainment(ordered: int, target: int | None) -> str:
     return f"{Decimal(ordered) / target:.1%}"
 
 
-def display_metrics(rows: list[dict], manager: bool) -> dict:
+def sales_totals(rows: list[dict]) -> tuple[int | None, int, int]:
     targets = [row["target_sen"] for row in rows if row["target_sen"] is not None]
     target = sum(targets) if len(targets) == len(rows) else None
     ordered = sum(row["ordered_sen"] for row in rows)
     order_count = sum(row["order_count"] for row in rows)
+    return target, ordered, order_count
+
+
+def sales_summary(totals: tuple[int | None, int, int]) -> dict:
+    target, ordered, order_count = totals
     remaining = max(target - ordered, 0) if target is not None else None
+    return {
+        "monthly_target": money(target),
+        "confirmed_order_value": money(ordered),
+        "confirmed_order_count": order_count,
+        "target_achieved": attainment(ordered, target),
+        "remaining_to_target": money(remaining),
+    }
+
+
+def display_metrics(rows: list[dict], totals: tuple[int | None, int, int], summary: dict, manager: bool) -> None:
+    target, ordered, order_count = totals
 
     st.subheader("Team progress" if manager else "My progress")
     columns = st.columns(4)
-    columns[0].metric("Monthly target", money(target))
-    columns[1].metric("Confirmed order value", money(ordered))
-    columns[2].metric("Target achieved", attainment(ordered, target))
-    columns[3].metric("Remaining to target", money(remaining))
+    columns[0].metric("Monthly target", summary["monthly_target"])
+    columns[1].metric("Confirmed order value", summary["confirmed_order_value"])
+    columns[2].metric("Target achieved", summary["target_achieved"])
+    columns[3].metric("Remaining to target", summary["remaining_to_target"])
     if target:
         st.progress(min(ordered / target, 1.0), text=f"{attainment(ordered, target)} of monthly target")
     st.caption(f"Confirmed orders · {order_count:,}")
@@ -154,13 +175,6 @@ def display_metrics(rows: list[dict], manager: bool) -> dict:
             hide_index=True,
             width="stretch",
         )
-    return {
-        "monthly_target": money(target),
-        "confirmed_order_value": money(ordered),
-        "confirmed_order_count": order_count,
-        "target_achieved": attainment(ordered, target),
-        "remaining_to_target": money(remaining),
-    }
 
 
 def display_orders(items: list[dict], manager: bool) -> None:
@@ -186,18 +200,22 @@ def display_orders(items: list[dict], manager: bool) -> None:
     })
 
 
-def display_assistant(snapshot: dict, summary: dict, month: date, mode: str) -> None:
+def submit_question(scope: tuple) -> None:
+    question = st.session_state["sales_question_input"].strip()
+    st.session_state["sales_request"] = (scope, question)
+    st.session_state["sales_request_submitted"] = True
+
+
+def request_controls(scope: tuple) -> None:
     st.subheader("Ask an assistant")
-    invoice = next((order["invoice"] for order in snapshot["orders"] if order["invoice"]), None)
-    examples = "Try “How much commission did I earn?” or “What are my orders by customer?”"
-    if invoice:
-        examples += f" For invoices, try “How much is {invoice}?” or “Has {invoice} been delivered?”"
-    st.caption(examples)
+    st.caption("Ask about commission, sales orders, invoice amounts, or delivery and POD.")
     with st.form("sales_question", clear_on_submit=True):
-        question = st.text_input("Question", placeholder="Ask in your own words", max_chars=500)
-        submitted = st.form_submit_button("Ask")
-    if not submitted:
-        return
+        st.text_input("Question", placeholder="Ask in your own words", max_chars=500, key="sales_question_input")
+        st.form_submit_button("Ask", type="primary", on_click=submit_question, args=(scope,))
+    st.toggle("Show all", key="sales_show_all", help="Show the full dashboard for the selected month.")
+
+
+def display_answer(question: str, snapshot: dict, summary: dict, month: date, mode: str, submitted: bool) -> None:
     assistant, answer = answer_request(question, snapshot, summary, month, mode, money)
     if not assistant:
         st.warning(answer)
@@ -207,7 +225,7 @@ def display_assistant(snapshot: dict, summary: dict, month: date, mode: str) -> 
 
     api_key = setting("GOOGLE_API_KEY")
     overview = f"{month:%B %Y} · {summary['confirmed_order_count']} confirmed orders\n"
-    if assistant != "Sales" or not api_key or not answer.startswith(overview):
+    if not submitted or assistant != "Sales" or not api_key or not answer.startswith(overview):
         return
 
     from google import genai
@@ -264,40 +282,62 @@ def main() -> None:
     month = st.sidebar.selectbox("Target month", months, format_func=lambda day: day.strftime("%B %Y"))
     st.sidebar.button("Refresh figures", width="stretch")
 
+    scope = (mode, code, email, month)
+    submitted = st.session_state.pop("sales_request_submitted", False)
+    saved = st.session_state.get("sales_request")
+    if saved and saved[0] != scope:
+        del st.session_state["sales_request"]
+        saved = None
+    active_question = saved[1] if saved else ""
+    show_all = st.session_state.get("sales_show_all", False)
+    include_data = bool(active_question or show_all)
+
     try:
-        with st.spinner("Loading sales figures…"):
-            snapshot = asyncio.run(fetch_snapshot(mode, email, code, month))
+        with st.spinner("Loading figures…" if include_data else "Checking staff access…"):
+            snapshot = asyncio.run(fetch_snapshot(mode, email, code, month, include_data))
     except Exception as error:
         LOGGER.warning("Sales figures could not load (%s)", type(error).__name__)
         st.error("Sales figures are unavailable. Try refreshing or contact your administrator.")
         st.stop()
     if not snapshot["authorized"]:
+        st.session_state.pop("sales_request", None)
         st.error("This staff ID could not be validated for your account. Check the ID or switch users.")
         st.stop()
+    request_controls(scope)
     if snapshot.get("configuration_required"):
         st.error("The sales data source needs area assignments and order details before it can show these figures.")
-        st.stop()
-
+        return
     manager = snapshot["role"] == "sales_manager"
     st.sidebar.text(snapshot["name"])
     st.sidebar.caption(f"{'Sales manager' if manager else 'Salesperson'} · {code}")
+    if submitted and not active_question:
+        st.warning("Enter a question to continue.")
+    if not include_data:
+        return
+
+    rows = snapshot["rows"]
+    if not rows:
+        st.info("No active direct reports are assigned to your account.")
+        return
+    if not manager and not rows[0]["area"]:
+        st.warning("Your staff ID has no assigned sales area.")
+        return
+    totals = sales_totals(rows)
+    summary = sales_summary(totals)
+    if active_question:
+        display_answer(active_question, snapshot, summary, month, mode, submitted)
+    if not show_all:
+        return
+
     through = date.fromisoformat(snapshot["through"]).strftime("%d %b %Y")
     st.caption(f"{month:%B %Y} · Order date cutoff {through} · Malaysia time")
     if mode == "live":
         updated = snapshot["source_updated_at"]
         st.caption(f"Source last synced · {updated}" if updated else "Source last sync time unavailable")
 
-    rows = snapshot["rows"]
-    if not rows:
-        st.info("No active direct reports are assigned to your account.")
-        st.stop()
     if not manager:
-        if not rows[0]["area"]:
-            st.warning("Your staff ID has no assigned sales area.")
-            st.stop()
         st.text(f'Sales area · {rows[0]["area"]}')
-    summary = display_metrics(rows, manager)
-    display_assistant(snapshot, summary, month, mode)
+    display_metrics(rows, totals, summary, manager)
     display_orders(snapshot["items"], manager)
 
 

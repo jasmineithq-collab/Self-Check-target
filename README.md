@@ -59,7 +59,7 @@ Only orders with status `confirmed` count. The app sums confirmed orders through
 
 ## Assistants
 
-Type a question in your own words. The guardrail checks it before routing it, and the app identifies questions outside the supported topics. The assistants use the selected month and the same access scope as the dashboard. The demo requires no API key.
+After signing in, type a question in **Ask an assistant**. The app shows the answer for the selected month and your access scope. Turn on **Show all** to see the full dashboard with targets, team progress where applicable, and order lines. The guardrail checks questions before routing them and identifies questions outside the supported topics. The demo requires no API key.
 
 - **Sales** answers questions about order totals and statuses, progress against target, customer breakdowns and sales invoices. Invoice values are the linked order amounts in this demo.
 - **HR** explains the sample commission policy and calculates the example amount for the visible salesperson or team. Live mode requires an approved policy before calculating commission.
