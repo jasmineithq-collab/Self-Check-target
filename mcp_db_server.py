@@ -76,7 +76,26 @@ DEMO_ITEMS = (
     ("Pantry", "Instant Oats 500 g"),
     ("Beverages", "Sparkling Lemon Water 330 ml"),
     ("Pantry", "Jasmine Rice 5 kg"),
+    ("Beverages", "Oolong Tea 500 ml"),
+    ("Beverages", "Coconut Water 330 ml"),
+    ("Snacks", "Honey Roasted Cashews 150 g"),
+    ("Snacks", "Seaweed Rice Crackers 100 g"),
+    ("Pantry", "Brown Rice 2 kg"),
+    ("Pantry", "Sesame Oil 250 ml"),
+    ("Frozen", "Vegetable Dumplings 400 g"),
+    ("Frozen", "Edamame 500 g"),
+    ("Chilled", "Unsweetened Soy Milk 1 L"),
+    ("Chilled", "Plain Yogurt 500 g"),
 )
+DEMO_CUSTOMERS = ("Retail Mart", "Wholesale Centre", "Grocers", "Foodservice Supply", "Mini Market")
+DEMO_POD_STATUSES = ("Delivered", "Pending POD", "In transit", "Delivered", "Delivery exception")
+
+
+def split_amount(amount: int, weights: tuple[int, ...]) -> list[int]:
+    total_weight = sum(weights)
+    parts = [amount * weight // total_weight for weight in weights]
+    parts[-1] += amount - sum(parts)
+    return parts
 
 
 def seed_demo(connection: sqlite3.Connection, today: date) -> None:
@@ -102,30 +121,37 @@ def seed_demo(connection: sqlite3.Connection, today: date) -> None:
                 "INSERT INTO sales_targets VALUES (?, ?, ?)",
                 (staff_id, period.isoformat(), target),
             )
-            progress = 68 + (index % 6) * 9 + (8 if period == previous_month else 0)
+            progress = (78, 108, 94, 87, 103, 116)[index % 6]
+            if period == previous_month:
+                progress -= 8
             ordered = target * progress // 100
-            for order, amount in enumerate((ordered * 55 // 100, ordered - ordered * 55 // 100, 350_000), 1):
+            confirmed_orders = [
+                ("confirmed", amount) for amount in split_amount(ordered, (9, 7, 6, 10, 5, 9, 8, 6, 7, 8, 5, 10))
+            ]
+            other_orders = [("pending", 350_000), ("pending", 215_000), ("pending", 425_000),
+                            ("cancelled", 180_000), ("cancelled", 290_000)]
+            orders = confirmed_orders + other_orders
+            days_available = (today - period).days if period == month else (month - period).days - 1
+            for order, (status, amount) in enumerate(orders, 1):
                 reference = f"{period:%y%m}-{index + 1:03}-{order:02}"
                 order_id = f"SO-{reference}"
-                confirmed = order < 3
-                order_date = min(period + timedelta(days=(order - 1) * 5), today)
+                invoice = f"INV-{reference}" if status == "confirmed" and order <= 10 else None
+                pod_status = DEMO_POD_STATUSES[(order - 1) % len(DEMO_POD_STATUSES)] if invoice else None
+                order_date = period + timedelta(days=days_available * (order - 1) // (len(orders) - 1))
                 connection.execute(
                     "INSERT INTO sales_orders VALUES (?, ?, ?, ?, ?)",
-                    (order_id, staff_id, order_date.isoformat(), "confirmed" if confirmed else "pending", amount),
+                    (order_id, staff_id, order_date.isoformat(), status, amount),
                 )
                 connection.execute(
                     "INSERT INTO order_details VALUES (?, ?, ?, ?, ?, ?)",
-                    (order_id, area, f"{area} {'Retail' if order == 1 else 'Wholesale'} (Demo)",
-                     f"INV-{reference}" if confirmed else None,
-                     ("Delivered" if order == 1 else "Pending POD") if confirmed else None,
-                     f"POD-{reference}" if order == 1 else None),
+                    (order_id, area, f"{area} {DEMO_CUSTOMERS[(order - 1) % len(DEMO_CUSTOMERS)]} (Demo)",
+                     invoice, pod_status, f"POD-{reference}" if pod_status == "Delivered" else None),
                 )
-                items = ((index + order) % len(DEMO_ITEMS), (index + order + 1) % len(DEMO_ITEMS))
-                first_amount = amount * 70 // 100
+                line_amounts = split_amount(amount, (5, 3, 2) if order % 2 else (3, 2))
                 connection.executemany(
                     "INSERT INTO order_items VALUES (?, ?, ?, ?, ?)",
-                    [(order_id, 1, *DEMO_ITEMS[items[0]], first_amount),
-                     (order_id, 2, *DEMO_ITEMS[items[1]], amount - first_amount)],
+                    [(order_id, line, *DEMO_ITEMS[(index + order * 3 + line) % len(DEMO_ITEMS)], line_amount)
+                     for line, line_amount in enumerate(line_amounts, 1)],
                 )
     connection.commit()
 

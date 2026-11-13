@@ -11,9 +11,9 @@ python -m pip install -r requirements.txt
 python -m streamlit run app.py
 ```
 
-Place the roster at `private/staff list.xlsx` or set `STAFF_ROSTER_PATH` to a private copy. Use the `DSM Code` or `Salesman Code` from its `DSM Management` sheet. The app assigns sample areas because the sheet has no area field. A clean checkout uses fictional codes `REP001` and `DSM001` for the salesperson and manager demo.
+Place the roster at `private/staff list.xlsx` or set `STAFF_ROSTER_PATH` to a private copy. Use the `DSM Code` or `Salesman Code` from its `DSM Management` sheet. The app assigns sample areas because the sheet has no area field. A clean checkout accepts `JEWD` and `SADSM1` as demo IDs with fictional names and team data. `REP001` and `DSM001` also work in the built-in demo.
 
-ID entry checks roster membership for the presentation. It does not establish the identity of the person entering the code. The sales figures, customers, targets, commission policy and POD references are samples. The app uses Malaysia calendar dates.
+ID entry checks roster membership for the presentation. Verified identity is required in live-data mode. For each salesperson, each demo month has 17 orders across five customers, including 12 confirmed orders, three pending orders and two cancelled orders. Ten orders have invoices with a mix of delivery and POD statuses. The app uses Malaysia calendar dates.
 
 ## Deploy on Streamlit Community Cloud
 
@@ -59,9 +59,9 @@ Only orders with status `confirmed` count. The app sums confirmed orders through
 
 ## Assistants
 
-The guardrail checks prompts before routing them. The assistants run with the same order visibility as the dashboard and require no API key for the demo.
+Type a question in your own words. The guardrail checks it before routing it, and the app identifies questions outside the supported topics. The assistants use the selected month and the same access scope as the dashboard. The demo requires no API key.
 
-- **Sales** answers questions about confirmed order totals, progress against target and totals by customer.
+- **Sales** answers questions about order totals and statuses, progress against target, customer breakdowns and sales invoices. Invoice values are the linked order amounts in this demo.
 - **HR** explains the sample commission policy and calculates the example amount for the visible salesperson or team. Live mode requires an approved policy before calculating commission.
 - **Logistics** looks up POD status and reference by invoice number within the selected month and the user's access scope.
 

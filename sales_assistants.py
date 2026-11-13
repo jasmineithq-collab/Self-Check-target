@@ -10,13 +10,18 @@ UNSAFE_REQUEST = re.compile(
     r"(?:records?|orders?|targets?|invoices?|tables?|users?|commission|data|pod)\b",
     re.IGNORECASE,
 )
-INTENTS = {
-    "Logistics": re.compile(r"\b(?:pod|proof of delivery|invoice|delivery status)\b", re.IGNORECASE),
-    "HR": re.compile(r"\b(?:commission|incentive|hr|commission policy)\b", re.IGNORECASE),
-    "Sales": re.compile(r"\b(?:sales|orders?|targets?|customers?|amount|progress|achievement|attainment|remaining)\b", re.IGNORECASE),
-}
-INVOICE_PATTERN = re.compile(r"\bINV(?:[-/][A-Z0-9]+|\d[A-Z0-9]*)(?:[-/][A-Z0-9]+)*\b", re.IGNORECASE)
-INVOICE_ARGUMENT = re.compile(r"\binvoice\s*#?\s*([A-Z0-9][A-Z0-9/_-]{0,39})\b", re.IGNORECASE)
+COMMISSION = re.compile(r"\b(?:commissions?|commissionable|sales incentives?|sales bonuses?|komisen)\b", re.IGNORECASE)
+DELIVERY = re.compile(
+    r"\b(?:pod|proof of delivery|deliver(?:y|ed|ies)|shipment|in transit|tracking|signed for|received|penghantaran)\b|\bwhere (?:is|are)\b",
+    re.IGNORECASE,
+)
+INVOICE = re.compile(r"\b(?:invoices?|invoiced|inv|invoicing|billed|billing|invois)\b", re.IGNORECASE)
+SALES = re.compile(r"\b(?:sales|salespeople|salesperson|orders?|ordered|targets?|quotas?|customers?|jualan|pesanan|sasaran)\b", re.IGNORECASE)
+ORDER_REF = re.compile(r"\bSO(?:[-/][A-Z0-9]+|\d[A-Z0-9]*)(?:[-/][A-Z0-9]+)*\b", re.IGNORECASE)
+INVOICE_REF = re.compile(r"\bINV(?:[-/][A-Z0-9]+|\d[A-Z0-9]*)(?:[-/][A-Z0-9]+)*\b", re.IGNORECASE)
+INVOICE_NUMBER = re.compile(r"\b(?:invoice|inv|invois)\s*(?:#|no\.?\s*)?([A-Z0-9/_-]*\d[A-Z0-9/_-]*)\b", re.IGNORECASE)
+OUT_OF_SCOPE = "That question is outside the supported topics. Ask about HR commission, sales orders, sales invoices, or invoice delivery and POD."
+UNRELATED_TASK = re.compile(r"\b(?:write|compose|tell|generate)\b.{0,35}\b(?:poem|joke|song|story)\b|\b(?:court orders?|target shooting|commission a painting)\b", re.IGNORECASE)
 
 
 def answer_request(question, snapshot, summary, month: date, mode: str, money):
@@ -25,49 +30,130 @@ def answer_request(question, snapshot, summary, month: date, mode: str, money):
         return None, "Enter one question up to 500 characters."
     if UNSAFE_REQUEST.search(question):
         return None, "This request is outside the assistant's read-only access. Ask about visible orders, commission policy, or an invoice POD."
+    if UNRELATED_TASK.search(question):
+        return None, OUT_OF_SCOPE
 
-    prefix = re.match(r"^(sales|hr|logistics)\s*:\s*(.+)$", question, re.IGNORECASE)
-    if prefix:
-        assistant = next(name for name in INTENTS if name.casefold() == prefix[1].casefold())
-        question = prefix[2]
-    elif INTENTS["HR"].search(question) and INTENTS["Logistics"].search(question):
-        return None, "Ask one question at a time, or start with Sales:, HR:, or Logistics:."
-    else:
-        assistant = next((name for name, intent in INTENTS.items() if intent.search(question)), None)
+    question = re.sub(r"^(?:sales|hr|logistics)\s*:\s*", "", question, flags=re.IGNORECASE)
+    orders = snapshot["orders"]
+    invoice = find_reference(question, orders, "invoice", INVOICE_REF, INVOICE_NUMBER)
+    order_id = find_reference(question, orders, "order_id", ORDER_REF)
+    delivery = DELIVERY.search(question)
+    invoice_topic = bool(invoice or INVOICE.search(question))
 
-    if assistant == "Logistics":
-        return assistant, logistics_answer(question, snapshot["orders"])
-    if assistant == "HR":
-        return assistant, hr_answer(snapshot["rows"], mode, money)
-    if assistant == "Sales":
-        return assistant, sales_answer(question, snapshot["orders"], summary, month, money)
-    return None, "Ask about sales and targets, commission policy, or proof of delivery for an invoice."
+    if COMMISSION.search(question):
+        if delivery and invoice_topic:
+            return None, "Ask one question at a time about commission or invoice delivery."
+        return "HR", hr_answer(snapshot["rows"], mode, money)
+    if delivery and (invoice_topic or order_id or re.search(r"\b(?:pod|proof of delivery)\b", question, re.IGNORECASE)):
+        return "Logistics", logistics_answer(question, invoice, order_id, orders)
+    if invoice_topic:
+        return "Sales", invoice_answer(question, invoice, order_id, orders, month, money)
+    if order_id or SALES.search(question):
+        return "Sales", sales_answer(question, order_id, orders, summary, month, money)
+    return None, OUT_OF_SCOPE
 
 
-def sales_answer(question, orders, summary, month, money):
-    if re.search(r"\bcustomers?\b", question, re.IGNORECASE):
-        totals = defaultdict(int)
-        for order in orders:
-            if order["status"] == "confirmed" and order["customer"]:
-                totals[order["customer"]] += order["amount_sen"]
-        named = [name for name in totals if name.casefold() in question.casefold()]
-        if not named:
-            named = [name for name in totals if name.removesuffix(" (Demo)").casefold() in question.casefold()]
-        specific = re.search(r"\bcustomer\s*(?:named\s+|:\s*)\S|\bfor customer\s+\S", question, re.IGNORECASE)
-        if specific and not named:
-            return "No confirmed orders for that customer are visible in the selected month."
-        if not totals:
-            return "No confirmed customer orders are visible in the selected month."
-        ranked = sorted(named or totals, key=lambda name: (-totals[name], name.casefold()))
-        lines = [f"{name} · {money(totals[name])}" for name in ranked[:10]]
-        if len(ranked) > 10:
-            lines.append(f"Showing the 10 highest of {len(ranked)} visible customer totals.")
-        return f"Confirmed orders by customer · {month:%B %Y}\n" + "\n".join(lines)
+def find_reference(question, orders, field, pattern, argument=None):
+    match = pattern.search(question)
+    if match:
+        return match[0]
+    if argument and (match := argument.search(question)):
+        return match[1]
+    # Live exports can use reference formats other than the demo's INV and SO codes.
+    for order in orders:
+        reference = order[field]
+        if reference and re.search(rf"(?<![\w/-]){re.escape(reference)}(?![\w/-])", question, re.IGNORECASE):
+            return reference
+    return None
+
+
+def matching_order(orders, field, reference):
+    return next((order for order in orders if (order[field] or "").casefold() == reference.casefold()), None)
+
+
+def invoice_answer(question, invoice, order_id, orders, month, money):
+    if invoice or order_id:
+        order = matching_order(orders, "invoice", invoice) if invoice else matching_order(orders, "order_id", order_id)
+        if order is None:
+            return "That reference is unavailable in your access scope for the selected month."
+        if not order["invoice"]:
+            return f"Order {order['order_id']} has no linked invoice."
+        return (
+            f"Invoice {order['invoice']} · Order {order['order_id']}\n"
+            f"Customer · {order['customer'] or 'Unavailable'}\n"
+            f"Linked order value · {money(order['amount_sen'])}"
+        )
+    invoiced = [order for order in orders if order["invoice"]]
+    if re.search(r"\bcustomers?\b", question, re.IGNORECASE) or mentions_customer(question, invoiced):
+        return customer_answer(question, invoiced, month, money, "Invoiced order value")
+    total = sum(order["amount_sen"] for order in invoiced)
+    answer = f"{month:%B %Y} · {len(invoiced)} invoices · {money(total)} in linked order value"
+    if invoiced and re.search(r"\b(?:list|show|which)\b", question, re.IGNORECASE):
+        lines = [f"{order['invoice']} · {order['customer'] or 'Unavailable'} · {money(order['amount_sen'])}"
+                 for order in invoiced[:10]]
+        if len(invoiced) > 10:
+            lines.append(f"Showing 10 of {len(invoiced)} invoices.")
+        answer += "\n" + "\n".join(lines)
+    return answer
+
+
+def sales_answer(question, order_id, orders, summary, month, money):
+    if order_id:
+        order = matching_order(orders, "order_id", order_id)
+        if order is None:
+            return "That order is unavailable in your access scope for the selected month."
+        return (
+            f"Order {order['order_id']} · {order['status'].title()} · {order['order_date']}\n"
+            f"Customer · {order['customer'] or 'Unavailable'}\n"
+            f"Order value · {money(order['amount_sen'])}\n"
+            f"Invoice · {order['invoice'] or 'Unavailable'}"
+        )
+    requested_statuses = [status for status in ("pending", "cancelled", "confirmed")
+                          if re.search(rf"\b{status}\b", question, re.IGNORECASE)]
+    all_orders = not requested_statuses and re.search(r"\b(?:all|every)\s+(?:sales\s+)?orders?\b", question, re.IGNORECASE)
+    statuses = requested_statuses or ["confirmed"]
+    selected = orders if all_orders else [order for order in orders if order["status"] in statuses]
+    label = "All orders" if all_orders else " and ".join(statuses).capitalize() + " orders"
+    if re.search(r"\bcustomers?\b", question, re.IGNORECASE) or mentions_customer(question, orders):
+        return customer_answer(question, selected, month, money, label)
+    list_orders = re.search(r"\b(?:list|which)\b", question, re.IGNORECASE)
+    if all_orders or statuses != ["confirmed"] or list_orders:
+        answer = f"{month:%B %Y} · {label} · {len(selected)} · {money(sum(order['amount_sen'] for order in selected))}"
+        if list_orders and selected:
+            lines = [f"{order['order_id']} · {order['status'].title()} · {money(order['amount_sen'])}" for order in selected[:10]]
+            if len(selected) > 10:
+                lines.append(f"Showing 10 of {len(selected)} orders.")
+            answer += "\n" + "\n".join(lines)
+        return answer
     return (
         f"{month:%B %Y} · {summary['confirmed_order_count']} confirmed orders\n"
         f"Order value {summary['confirmed_order_value']} · Target {summary['monthly_target']}\n"
         f"Achieved {summary['target_achieved']} · Remaining {summary['remaining_to_target']}"
     )
+
+
+def mentions_customer(question, orders):
+    query = question.casefold()
+    return any(order["customer"] and order["customer"].removesuffix(" (Demo)").casefold() in query for order in orders)
+
+
+def customer_answer(question, orders, month, money, label):
+    totals = defaultdict(int)
+    for order in orders:
+        if order["customer"]:
+            totals[order["customer"]] += order["amount_sen"]
+    query = question.casefold()
+    named = [name for name in totals if name.removesuffix(" (Demo)").casefold() in query]
+    specific = re.search(r"\bcustomer\s*(?:named\s+|:\s*)\S|\bfor customer\s+\S", question, re.IGNORECASE)
+    if specific and not named:
+        return "No matching orders for that customer are visible in the selected month."
+    if not totals:
+        return "No matching customer orders are visible in the selected month."
+    ranked = sorted(named or totals, key=lambda name: (-totals[name], name.casefold()))
+    lines = [f"{name} · {money(totals[name])}" for name in ranked[:10]]
+    if len(ranked) > 10:
+        lines.append(f"Showing the 10 highest of {len(ranked)} visible customer totals.")
+    return f"{label} by customer · {month:%B %Y}\n" + "\n".join(lines)
 
 
 def hr_answer(rows, mode, money):
@@ -86,16 +172,33 @@ def hr_answer(rows, mode, money):
     return answer
 
 
-def logistics_answer(question, orders):
-    invoice = INVOICE_PATTERN.search(question) or INVOICE_ARGUMENT.search(question)
-    if not invoice:
-        return "Enter an invoice number, for example: POD for INV-2611-001-01."
-    reference = invoice[0] if invoice.re is INVOICE_PATTERN else invoice[1]
-    match = next((order for order in orders if (order["invoice"] or "").casefold() == reference.casefold()), None)
+def logistics_answer(question, invoice, order_id, orders):
+    if not invoice and not order_id:
+        if re.search(r"\b(?:invoices|how many|which|list)\b", question, re.IGNORECASE):
+            invoiced = [order for order in orders if order["invoice"]]
+            requested = re.search(r"\b(?:delivered|pending pod|in transit|delivery exception)\b", question, re.IGNORECASE)
+            if requested:
+                status = requested[0].casefold()
+                matched = [order for order in invoiced if (order["pod_status"] or "").casefold() == status]
+                answer = f"{len(matched)} visible invoices · {requested[0].capitalize()}"
+                if matched and re.search(r"\b(?:which|list|show)\b", question, re.IGNORECASE):
+                    answer += "\n" + "\n".join(order["invoice"] for order in matched[:10])
+                    if len(matched) > 10:
+                        answer += f"\nShowing 10 of {len(matched)} invoices."
+                return answer
+            statuses = defaultdict(int)
+            for order in invoiced:
+                statuses[order["pod_status"] or "Unavailable"] += 1
+            if not statuses:
+                return "No invoices are visible in the selected month."
+            lines = [f"{status} · {count}" for status, count in sorted(statuses.items())]
+            return "Visible invoices by delivery / POD status\n" + "\n".join(lines)
+        return "Include an invoice number from the orders table so I can look up its delivery and POD."
+    match = matching_order(orders, "invoice", invoice) if invoice else matching_order(orders, "order_id", order_id)
     if match is None:
-        return "That invoice is unavailable in your access scope for the selected month."
+        return "That reference is unavailable in your access scope for the selected month."
     return (
-        f"Invoice {match['invoice']} · Order {match['order_id']}\n"
-        f"POD status · {match['pod_status'] or 'Unavailable'}\n"
+        f"Invoice {match['invoice'] or 'Unavailable'} · Order {match['order_id']}\n"
+        f"Delivery / POD status · {match['pod_status'] or 'Unavailable'}\n"
         f"POD reference · {match['pod_reference'] or 'Unavailable'}"
     )

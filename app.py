@@ -189,12 +189,12 @@ def display_orders(items: list[dict], manager: bool) -> None:
 def display_assistant(snapshot: dict, summary: dict, month: date, mode: str) -> None:
     st.subheader("Ask an assistant")
     invoice = next((order["invoice"] for order in snapshot["orders"] if order["invoice"]), None)
-    examples = "Sales: Orders by customer · HR: How is commission calculated?"
+    examples = "Try “How much commission did I earn?” or “What are my orders by customer?”"
     if invoice:
-        examples += f" · Logistics: POD for {invoice}"
+        examples += f" For invoices, try “How much is {invoice}?” or “Has {invoice} been delivered?”"
     st.caption(examples)
     with st.form("sales_question", clear_on_submit=True):
-        question = st.text_input("Question", placeholder="How are my orders tracking against target?", max_chars=500)
+        question = st.text_input("Question", placeholder="Ask in your own words", max_chars=500)
         submitted = st.form_submit_button("Ask")
     if not submitted:
         return
@@ -203,10 +203,11 @@ def display_assistant(snapshot: dict, summary: dict, month: date, mode: str) -> 
         st.warning(answer)
         return
     st.markdown(f"**{assistant} assistant**")
-    st.text(answer)
+    st.text(answer, width="stretch")
 
     api_key = setting("GOOGLE_API_KEY")
-    if assistant != "Sales" or not api_key or "customer" in question.casefold():
+    overview = f"{month:%B %Y} · {summary['confirmed_order_count']} confirmed orders\n"
+    if assistant != "Sales" or not api_key or not answer.startswith(overview):
         return
 
     from google import genai
@@ -296,8 +297,8 @@ def main() -> None:
             st.stop()
         st.text(f'Sales area · {rows[0]["area"]}')
     summary = display_metrics(rows, manager)
-    display_orders(snapshot["items"], manager)
     display_assistant(snapshot, summary, month, mode)
+    display_orders(snapshot["items"], manager)
 
 
 if __name__ == "__main__":

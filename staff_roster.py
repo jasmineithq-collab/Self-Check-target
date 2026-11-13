@@ -25,6 +25,9 @@ def load_roster(encoded: str = "", path: str = "") -> dict[str, Staff]:
             Staff("DSM001", "Mei Tan"), Staff("DSM002", "Farah Noor"),
             Staff("REP001", "Aina Rahman", "DSM001"), Staff("REP002", "Daniel Lim", "DSM001"),
             Staff("REP003", "Sam Lee", "DSM002"),
+            Staff("SADSM1", "Demo Sales Manager"),
+            Staff("JEWD", "Demo Salesperson", "SADSM1"),
+            Staff("DEMOREP1", "Demo Salesperson 2", "SADSM1"),
         )
         return {staff.code: staff for staff in demo}
 
