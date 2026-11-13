@@ -12,7 +12,7 @@ from mcp.client.stdio import stdio_client
 from streamlit.errors import StreamlitSecretNotFoundError
 
 from mcp_db_server import RETURNS_URI, SALES_TIMEZONE
-from staff_roster import CODE_PATTERN, load_roster
+from staff_roster import CODE_PATTERN, DEMO_MANAGER_ID, DEMO_STAFF_ID, load_roster
 from sales_assistants import guardrail_message, mask_pii
 
 
@@ -43,6 +43,8 @@ def staff_code(mode: str) -> str:
         return code
 
     with st.form("staff_sign_in"):
+        if mode == "demo":
+            st.markdown(f"Demo IDs · **Manager** `{DEMO_MANAGER_ID}` · **Staff** `{DEMO_STAFF_ID}`")
         entered = st.text_input("Staff ID", placeholder="Enter your staff code", max_chars=32)
         submitted = st.form_submit_button("Continue", type="primary")
     if submitted:
@@ -253,6 +255,8 @@ def display_chat(scope: tuple, history: list[dict]) -> None:
 def render_message(entry: dict) -> None:
     with st.chat_message(entry["role"]):
         st.text(entry["text"], width="stretch")
+        if "usage" in entry:
+            display_answer_usage(entry["usage"], entry["usage_complete"])
         if evidence := entry.get("evidence"):
             with st.expander("Sources · " + ", ".join(evidence)):
                 for source, results in evidence.items():
@@ -260,26 +264,60 @@ def render_message(entry: dict) -> None:
                     for result in dict.fromkeys(results):
                         st.text(result, width="stretch")
 
-def agent_reply(question, history, snapshot, month, mode, api_key, blocked):
+def display_answer_usage(records: list[dict], complete: bool) -> None:
+    if not records:
+        detail = "No model calls · $0.000000 USD" if complete else "Unavailable for this request"
+        st.caption(f"AI usage · {detail}")
+        return
+
+    measured = [record for record in records if record["usage_available"]]
+    priced = [record["estimated_usd"] for record in records if record["estimated_usd"] is not None]
+    call_label = "model response" if len(records) == 1 else "model responses"
+    parts = [f"AI usage · {len(records)} {call_label}"]
+    if measured:
+        prompt, output, thinking = (
+            sum(record[field] for record in measured)
+            for field in ("prompt_tokens", "output_tokens", "thinking_tokens")
+        )
+        cached = sum(record["cached_tokens"] for record in measured)
+        input_label = f"{prompt:,} input tokens"
+        if cached:
+            input_label += f" ({cached:,} cached)"
+        parts.extend((input_label, f"{output:,} output", f"{thinking:,} thinking"))
+    else:
+        parts.append("Token counts unavailable")
+    if priced:
+        label = "Estimated cost" if complete and len(priced) == len(records) else "Partial estimated cost"
+        parts.append(f"{label} ${sum(priced):.6f} USD")
+    else:
+        parts.append("Estimated cost unavailable")
+    if not complete or (measured and len(measured) != len(records)):
+        parts.append("Usage may be incomplete")
+    st.caption(" · ".join(parts))
+
+
+def agent_reply(question, history, snapshot, month, mode, api_key, blocked, usage_records):
     if blocked:
-        return blocked, {}
+        return blocked, {}, True
     if not api_key:
-        return "The AI assistant needs GOOGLE_API_KEY in Streamlit Secrets. You can view the dashboard with Show all.", {}
+        return "The AI assistant needs GOOGLE_API_KEY in Streamlit Secrets. You can view the dashboard with Show all.", {}, True
     if snapshot.get("configuration_required"):
-        return "The sales source needs area assignments and order details. Contact your administrator.", {}
+        return "The sales source needs area assignments and order details. Contact your administrator.", {}, True
     if not snapshot["rows"] or (snapshot["role"] == "salesperson" and not snapshot["rows"][0]["area"]):
-        return "There is no sales area or team assigned to this account. Contact your administrator.", {}
+        return "There is no sales area or team assigned to this account. Contact your administrator.", {}, True
     try:
         from enterprise_agents import MODEL, coordinate
 
         summary = sales_summary(sales_totals(snapshot["rows"]))
         with st.spinner("Consulting the specialists…"):
-            return asyncio.run(coordinate(
-                question, history, snapshot, summary, month, mode, money, api_key, setting("GEMINI_MODEL", MODEL)
+            answer, evidence = asyncio.run(coordinate(
+                question, history, snapshot, summary, month, mode, money, api_key, setting("GEMINI_MODEL", MODEL),
+                usage_records=usage_records,
             ))
+        return answer, evidence, True
     except Exception as error:
         LOGGER.warning("Sales coordinator failed (%s)", type(error).__name__)
-        return "The AI assistant is temporarily unavailable. Try again, or use Show all to view your figures.", {}
+        return "The AI assistant is temporarily unavailable. Try again, or use Show all to view your figures.", {}, False
 
 
 def main() -> None:
@@ -335,8 +373,10 @@ def main() -> None:
     if question:
         user_entry = {"role": "user", "text": question, "blocked": bool(blocked)}
         render_message(user_entry)
-        answer, evidence = agent_reply(question, history, snapshot, month, mode, api_key, blocked)
-        assistant_entry = {"role": "assistant", "text": answer, "evidence": evidence, "blocked": bool(blocked)}
+        usage_records = []
+        answer, evidence, usage_complete = agent_reply(question, history, snapshot, month, mode, api_key, blocked, usage_records)
+        assistant_entry = {"role": "assistant", "text": answer, "evidence": evidence, "blocked": bool(blocked),
+                           "usage": usage_records, "usage_complete": usage_complete}
         render_message(assistant_entry)
         history = [*history, user_entry, assistant_entry][-20:]
         st.session_state["sales_chat"] = (scope, history)

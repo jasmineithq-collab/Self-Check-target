@@ -25,7 +25,7 @@ LOGGER = logging.getLogger(__name__)
 STANDARD_RATES = {MODEL: (1.50, 0.15, 9.00)}
 
 
-def usage_callback(model_name: str, request_id: str):
+def usage_callback(model_name: str, request_id: str, usage_records=None):
     def after_model_callback(callback_context, llm_response):
         usage = llm_response.usage_metadata
         prompt = (usage.prompt_token_count or 0) if usage else 0
@@ -37,12 +37,15 @@ def usage_callback(model_name: str, request_id: str):
         if rates and usage:
             input_rate, cached_rate, output_rate = rates
             cost = round(((prompt - cached) * input_rate + cached * cached_rate + (output + thoughts) * output_rate) / 1_000_000, 9)
-        # Warning level makes usage visible with Streamlit's default logging configuration.
-        LOGGER.warning("model_usage %s", json.dumps({
+        record = {
             "request_id": request_id, "agent": callback_context.agent_name, "model": model_name,
             "prompt_tokens": prompt, "cached_tokens": cached, "output_tokens": output,
             "thinking_tokens": thoughts, "usage_available": usage is not None, "estimated_usd": cost,
-        }))
+        }
+        if usage_records is not None:
+            usage_records.append(record)
+        # Warning level makes usage visible with Streamlit's default logging configuration.
+        LOGGER.warning("model_usage %s", json.dumps(record))
     return after_model_callback
 
 
@@ -201,7 +204,7 @@ def build_coordinator(model, snapshot, summary, month: date, mode: str, money, e
     )
 
 
-async def coordinate(question, history, snapshot, summary, month, mode, money, api_key, model_name=MODEL):
+async def coordinate(question, history, snapshot, summary, month, mode, money, api_key, model_name=MODEL, *, usage_records=None):
     if blocked := guardrail_message(question):
         return blocked, {}
     question = mask_pii(question)
@@ -211,7 +214,7 @@ async def coordinate(question, history, snapshot, summary, month, mode, money, a
         async with client.aio:
             model = Gemini(model=model_name, client=client)
             agent = build_coordinator(model, snapshot, summary, month, mode, money, evidence,
-                                      usage_callback(model_name, uuid4().hex))
+                                      usage_callback(model_name, uuid4().hex, usage_records))
             runner = InMemoryRunner(agent=agent, app_name=APP_NAME)
             try:
                 session = await runner.session_service.create_session(app_name=APP_NAME, user_id="staff")

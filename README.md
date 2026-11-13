@@ -80,7 +80,7 @@ Set `GOOGLE_API_KEY` in Streamlit Secrets to enable chat. The ADK coordinator us
 | 1. Agents | ADK coordinator with Sales, HR, and Logistics specialists. Logistics covers shipments, POD, inventory, refunds and returns. |
 | 2. MCP integration | The client discovers `get_sales_progress` with `tools/list` and retrieves the Markdown policy with `resources/list` and `resources/read`. The server uses parameterized SQLite queries scoped to the signed-in staff member. |
 | 3. Guardrails | Input checks block known injection patterns and mask common personal identifiers before chat storage or model calls. SQLGlot verifies the SQLite AST in `is_sql_mutation`. Live SQLite uses `mode=ro`, and all data connections use `query_only` and a SQLite authorizer. |
-| 4. Observability | `after_model_callback` emits `model_usage` JSON lines in Streamlit logs for the coordinator and specialists. Each line includes a request ID, model, token counts, and the estimated standard paid-tier USD cost when pricing and usage are available. It excludes prompts and record content. |
+| 4. Observability | Each chat reply shows the coordinator and specialists' combined token usage and estimated standard paid-tier USD cost. `after_model_callback` emits a `model_usage` JSON line for each model response with a request ID and agent name. Logs exclude prompts and record content. |
 | 5. Evaluation | `evaluate_logistics.py` runs four golden cases through MCP and ADK and grades factual accuracy with Gemini. A missing expected source or failed judgment makes the command exit nonzero. |
 | 6. Deployment | `app.py` and `requirements.txt` deploy from GitHub `main` with Python 3.12. Configure the key through Streamlit Secrets. |
 

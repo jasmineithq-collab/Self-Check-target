@@ -9,6 +9,8 @@ from openpyxl import load_workbook
 
 DEFAULT_ROSTER = Path(__file__).with_name("private") / "staff list.xlsx"
 CODE_PATTERN = re.compile(r"[A-Z0-9_-]{1,32}")
+DEMO_MANAGER_ID = "SADSM1"
+DEMO_STAFF_ID = "REP001"
 
 
 @dataclass(frozen=True)
@@ -23,11 +25,11 @@ def load_roster(encoded: str = "", path: str = "", *, fixture: bool = False) -> 
     if fixture or (not encoded and not path and not source.is_file()):
         demo = (
             Staff("DSM001", "Mei Tan"), Staff("DSM002", "Farah Noor"),
-            Staff("REP001", "Aina Rahman", "DSM001"), Staff("REP002", "Daniel Lim", "DSM001"),
+            Staff(DEMO_STAFF_ID, "Aina Rahman", "DSM001"), Staff("REP002", "Daniel Lim", "DSM001"),
             Staff("REP003", "Sam Lee", "DSM002"),
-            Staff("SADSM1", "Demo Sales Manager"),
-            Staff("JEWD", "Demo Salesperson", "SADSM1"),
-            Staff("DEMOREP1", "Demo Salesperson 2", "SADSM1"),
+            Staff(DEMO_MANAGER_ID, "Demo Sales Manager"),
+            Staff("JEWD", "Demo Salesperson", DEMO_MANAGER_ID),
+            Staff("DEMOREP1", "Demo Salesperson 2", DEMO_MANAGER_ID),
         )
         return {staff.code: staff for staff in demo}
 
@@ -57,6 +59,9 @@ def load_roster(encoded: str = "", path: str = "", *, fixture: bool = False) -> 
             reps[rep_code] = Staff(rep_code, rep_name, manager_code)
         if not reps or managers.keys() & reps.keys():
             raise ValueError("Invalid manager and salesperson roster")
-        return managers | reps
+        roster = managers | reps
+        roster.setdefault(DEMO_MANAGER_ID, Staff(DEMO_MANAGER_ID, "Demo Sales Manager"))
+        roster.setdefault(DEMO_STAFF_ID, Staff(DEMO_STAFF_ID, "Demo Staff", DEMO_MANAGER_ID))
+        return roster
     finally:
         workbook.close()
