@@ -27,13 +27,17 @@ def setting(name: str, default: str = "") -> str:
         return os.environ.get(name, default)
 
 
+def clear_chat_history() -> None:
+    st.session_state.pop("sales_chat", None)
+    st.session_state.pop("sales_pending_question", None)
+
+
 def staff_code(mode: str) -> str:
     code = st.session_state.get("sales_staff_code", "")
     if code:
         if st.sidebar.button("Switch user", width="stretch"):
             del st.session_state["sales_staff_code"]
-            st.session_state.pop("sales_chat", None)
-            st.session_state.pop("sales_pending_question", None)
+            clear_chat_history()
             st.session_state.pop("sales_show_all", None)
             st.rerun()
         return code
@@ -291,7 +295,7 @@ def main() -> None:
         st.error("Sales figures are unavailable. Try refreshing or contact your administrator.")
         st.stop()
     if not snapshot["authorized"]:
-        st.session_state.pop("sales_chat", None)
+        clear_chat_history()
         st.error("This staff ID could not be validated for your account. Check the ID or switch users.")
         st.stop()
     display_chat(scope, history)
@@ -301,7 +305,9 @@ def main() -> None:
         answer, evidence = agent_reply(question, history, snapshot, month, mode, api_key, blocked)
         assistant_entry = {"role": "assistant", "text": answer, "evidence": evidence}
         render_message(assistant_entry)
-        st.session_state["sales_chat"] = (scope, [*history, user_entry, assistant_entry][-20:])
+        history = [*history, user_entry, assistant_entry][-20:]
+        st.session_state["sales_chat"] = (scope, history)
+    st.sidebar.button("Clear chat history", on_click=clear_chat_history, width="stretch", disabled=not history)
     manager = snapshot.get("role") == "sales_manager"
     if snapshot.get("name"):
         st.sidebar.text(snapshot["name"])
