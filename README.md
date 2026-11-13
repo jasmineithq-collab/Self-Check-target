@@ -59,7 +59,7 @@ Only orders with status `confirmed` count. The app sums confirmed orders through
 
 ## Assistants
 
-After signing in, type a question in **Ask an assistant**. You can ask follow-up questions in the same chat. Changing the staff account or reporting month starts a new chat. The dashboard below the chat shows targets, team progress where applicable, and order lines. It works without an AI key.
+After signing in, type a question in **Ask an assistant**. You can ask follow-up questions in the same chat. Changing the staff account or reporting month starts a new chat. Turn on **Show all** to see the dashboard below the chat with targets, team progress where applicable, and order lines. The dashboard works without an AI key.
 
 - **Sales** answers questions about order totals and statuses, progress against target, customer breakdowns and sales invoices. Invoice values are the linked order amounts in this demo.
 - **HR** asks the Sales specialist for confirmed order totals and individual targets for the selected month. It applies the sample commission policy and presents the eligible sales and estimated commission for the visible salesperson or team. Live mode requires an approved policy before calculating commission.

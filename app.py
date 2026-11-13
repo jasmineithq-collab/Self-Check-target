@@ -38,6 +38,7 @@ def staff_code(mode: str) -> str:
         if st.sidebar.button("Switch user", width="stretch"):
             del st.session_state["sales_staff_code"]
             clear_chat_history()
+            st.session_state.pop("sales_show_all", None)
             st.rerun()
         return code
 
@@ -244,6 +245,7 @@ def queue_suggestion(scope: tuple, question: str) -> None:
 def display_chat(scope: tuple, history: list[dict]) -> None:
     st.subheader("Ask an assistant")
     st.caption("Ask about shipments and POD, stock, refunds, returns, sales, or commission.")
+    st.toggle("Show all", key="sales_show_all", help="Show the full dashboard for the selected month.")
     for entry in history:
         render_message(entry)
     with st.container():
@@ -320,7 +322,7 @@ def agent_reply(question, history, snapshot, month, mode, api_key, blocked, usag
     if blocked:
         return blocked, {}, True
     if not api_key:
-        return "The AI assistant needs GOOGLE_API_KEY in Streamlit Secrets.", {}, True
+        return "The AI assistant needs GOOGLE_API_KEY in Streamlit Secrets. Turn on Show all to see your dashboard.", {}, True
     if snapshot.get("configuration_required"):
         return "The sales source needs area assignments and order details. Contact your administrator.", {}, True
     if not snapshot["rows"] or (snapshot["role"] == "salesperson" and not snapshot["rows"][0]["area"]):
@@ -337,7 +339,7 @@ def agent_reply(question, history, snapshot, month, mode, api_key, blocked, usag
         return answer, evidence, True
     except Exception as error:
         LOGGER.warning("Sales coordinator failed (%s)", type(error).__name__)
-        return "The AI assistant is temporarily unavailable. Try again, or view your figures below.", {}, False
+        return "The AI assistant is temporarily unavailable. Try again, or use Show all to view your figures.", {}, False
 
 
 def main() -> None:
@@ -376,10 +378,12 @@ def main() -> None:
     question = mask_pii(question)
     api_key = setting("GOOGLE_API_KEY")
     include_policy = bool(question and api_key and not blocked)
+    show_all = st.session_state.get("sales_show_all", False)
+    include_data = show_all or include_policy
 
     try:
-        with st.spinner("Loading figures…"):
-            snapshot = asyncio.run(fetch_snapshot(mode, email, code, month, include_data=True, include_policy=include_policy))
+        with st.spinner("Loading figures…" if include_data else "Checking staff access…"):
+            snapshot = asyncio.run(fetch_snapshot(mode, email, code, month, include_data=include_data, include_policy=include_policy))
     except Exception as error:
         LOGGER.warning("Sales figures could not load (%s)", type(error).__name__)
         st.error("Sales figures are unavailable. Try refreshing or contact your administrator.")
@@ -409,6 +413,8 @@ def main() -> None:
     if snapshot.get("name"):
         st.sidebar.text(snapshot["name"])
         st.sidebar.caption(f"{'Sales manager' if manager else 'Salesperson'} · {code}")
+    if not show_all:
+        return
     if snapshot.get("configuration_required"):
         st.error("The sales data source needs area assignments and order details before it can show these figures.")
         return
