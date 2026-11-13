@@ -59,10 +59,14 @@ Only orders with status `confirmed` count. The app sums confirmed orders through
 
 ## Assistants
 
-After signing in, type a question in **Ask an assistant**. The app shows the answer for the selected month and your access scope. Turn on **Show all** to see the full dashboard with targets, team progress where applicable, and order lines. The guardrail checks questions before routing them and identifies questions outside the supported topics. The demo requires no API key.
+After signing in, type a question in **Ask an assistant**. You can ask follow-up questions in the same chat. Changing the staff account or reporting month starts a new chat. Turn on **Show all** to see the full dashboard with targets, team progress where applicable, and order lines. The dashboard works without an AI key.
 
 - **Sales** answers questions about order totals and statuses, progress against target, customer breakdowns and sales invoices. Invoice values are the linked order amounts in this demo.
 - **HR** explains the sample commission policy and calculates the example amount for the visible salesperson or team. Live mode requires an approved policy before calculating commission.
 - **Logistics** looks up POD status and reference by invoice number within the selected month and the user's access scope.
 
-Set `GOOGLE_API_KEY` in Streamlit secrets to enable an optional Gemini summary for general Sales questions. Set `GEMINI_MODEL` to override the model. Gemini receives the visible aggregate figures and a fixed summary task. Staff names, customer names, invoice details and the typed question stay in the app.
+Ask “How much is this invoice and has it been delivered?” with a visible invoice number to get the Sales and Logistics results together.
+
+### ADK coordinator
+
+Set `GOOGLE_API_KEY` in Streamlit Secrets to enable chat. The ADK coordinator uses `gemini-3.5-flash` by default. Set `GEMINI_MODEL` to override it. The coordinator chooses specialists based on the question, can consult more than one, and synthesizes their findings. The app shows actual tool results under **Sources**. Questions outside the supported topics get a scope message. Gemini receives the question, recent chat context, and scoped data returned by specialist tools. The tools use the authorized SQLite data loaded over MCP and have read-only access. [Gemini 3.5 Flash documentation](https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash)

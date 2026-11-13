@@ -10,13 +10,6 @@ UNSAFE_REQUEST = re.compile(
     r"(?:records?|orders?|targets?|invoices?|tables?|users?|commission|data|pod)\b",
     re.IGNORECASE,
 )
-COMMISSION = re.compile(r"\b(?:commissions?|commissionable|sales incentives?|sales bonuses?|komisen)\b", re.IGNORECASE)
-DELIVERY = re.compile(
-    r"\b(?:pod|proof of delivery|deliver(?:y|ed|ies)|shipment|in transit|tracking|signed for|received|penghantaran)\b|\bwhere (?:is|are)\b",
-    re.IGNORECASE,
-)
-INVOICE = re.compile(r"\b(?:invoices?|invoiced|inv|invoicing|billed|billing|invois)\b", re.IGNORECASE)
-SALES = re.compile(r"\b(?:sales|salespeople|salesperson|orders?|ordered|targets?|quotas?|customers?|jualan|pesanan|sasaran)\b", re.IGNORECASE)
 ORDER_REF = re.compile(r"\bSO(?:[-/][A-Z0-9]+|\d[A-Z0-9]*)(?:[-/][A-Z0-9]+)*\b", re.IGNORECASE)
 INVOICE_REF = re.compile(r"\bINV(?:[-/][A-Z0-9]+|\d[A-Z0-9]*)(?:[-/][A-Z0-9]+)*\b", re.IGNORECASE)
 INVOICE_NUMBER = re.compile(r"\b(?:invoice|inv|invois)\s*(?:#|no\.?\s*)?([A-Z0-9/_-]*\d[A-Z0-9/_-]*)\b", re.IGNORECASE)
@@ -24,33 +17,16 @@ OUT_OF_SCOPE = "That question is outside the supported topics. Ask about HR comm
 UNRELATED_TASK = re.compile(r"\b(?:write|compose|tell|generate)\b.{0,35}\b(?:poem|joke|song|story)\b|\b(?:court orders?|target shooting|commission a painting)\b", re.IGNORECASE)
 
 
-def answer_request(question, snapshot, summary, month: date, mode: str, money):
+def guardrail_message(question: str) -> str:
+    """Reject unsafe input before it reaches an agent."""
     question = " ".join(question.split())
     if not question or len(question) > 500:
-        return None, "Enter one question up to 500 characters."
+        return "Enter a question up to 500 characters."
     if UNSAFE_REQUEST.search(question):
-        return None, "This request is outside the assistant's read-only access. Ask about visible orders, commission policy, or an invoice POD."
+        return "This request is outside the assistant's read-only access. Ask about visible orders, commission policy, or an invoice POD."
     if UNRELATED_TASK.search(question):
-        return None, OUT_OF_SCOPE
-
-    question = re.sub(r"^(?:sales|hr|logistics)\s*:\s*", "", question, flags=re.IGNORECASE)
-    orders = snapshot["orders"]
-    invoice = find_reference(question, orders, "invoice", INVOICE_REF, INVOICE_NUMBER)
-    order_id = find_reference(question, orders, "order_id", ORDER_REF)
-    delivery = DELIVERY.search(question)
-    invoice_topic = bool(invoice or INVOICE.search(question))
-
-    if COMMISSION.search(question):
-        if delivery and invoice_topic:
-            return None, "Ask one question at a time about commission or invoice delivery."
-        return "HR", hr_answer(snapshot["rows"], mode, money)
-    if delivery and (invoice_topic or order_id or re.search(r"\b(?:pod|proof of delivery)\b", question, re.IGNORECASE)):
-        return "Logistics", logistics_answer(question, invoice, order_id, orders)
-    if invoice_topic:
-        return "Sales", invoice_answer(question, invoice, order_id, orders, month, money)
-    if order_id or SALES.search(question):
-        return "Sales", sales_answer(question, order_id, orders, summary, month, money)
-    return None, OUT_OF_SCOPE
+        return OUT_OF_SCOPE
+    return ""
 
 
 def find_reference(question, orders, field, pattern, argument=None):

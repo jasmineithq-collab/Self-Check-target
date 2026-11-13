@@ -1,5 +1,4 @@
 import asyncio
-import json
 import logging
 import os
 import sys
@@ -14,7 +13,7 @@ from streamlit.errors import StreamlitSecretNotFoundError
 
 from mcp_db_server import SALES_TIMEZONE
 from staff_roster import CODE_PATTERN, load_roster
-from sales_assistants import answer_request
+from sales_assistants import guardrail_message
 
 
 LOGGER = logging.getLogger(__name__)
@@ -33,8 +32,8 @@ def staff_code(mode: str) -> str:
     if code:
         if st.sidebar.button("Switch user", width="stretch"):
             del st.session_state["sales_staff_code"]
-            st.session_state.pop("sales_request", None)
-            st.session_state.pop("sales_request_submitted", None)
+            st.session_state.pop("sales_chat", None)
+            st.session_state.pop("sales_pending_question", None)
             st.session_state.pop("sales_show_all", None)
             st.rerun()
         return code
@@ -202,59 +201,49 @@ def display_orders(items: list[dict], manager: bool) -> None:
 
 def submit_question(scope: tuple) -> None:
     question = st.session_state["sales_question_input"].strip()
-    st.session_state["sales_request"] = (scope, question)
-    st.session_state["sales_request_submitted"] = True
+    st.session_state["sales_pending_question"] = (scope, question)
 
 
-def request_controls(scope: tuple) -> None:
+def display_chat(scope: tuple, history: list[dict]) -> None:
     st.subheader("Ask an assistant")
     st.caption("Ask about commission, sales orders, invoice amounts, or delivery and POD.")
-    with st.form("sales_question", clear_on_submit=True):
-        st.text_input("Question", placeholder="Ask in your own words", max_chars=500, key="sales_question_input")
-        st.form_submit_button("Ask", type="primary", on_click=submit_question, args=(scope,))
     st.toggle("Show all", key="sales_show_all", help="Show the full dashboard for the selected month.")
+    for entry in history:
+        render_message(entry)
+    with st.container():
+        st.chat_input("Ask in your own words", max_chars=500, key="sales_question_input", on_submit=submit_question, args=(scope,))
 
 
-def display_answer(question: str, snapshot: dict, summary: dict, month: date, mode: str, submitted: bool) -> None:
-    assistant, answer = answer_request(question, snapshot, summary, month, mode, money)
-    if not assistant:
-        st.warning(answer)
-        return
-    st.markdown(f"**{assistant} assistant**")
-    st.text(answer, width="stretch")
+def render_message(entry: dict) -> None:
+    with st.chat_message(entry["role"]):
+        st.text(entry["text"], width="stretch")
+        if evidence := entry.get("evidence"):
+            with st.expander("Sources · " + ", ".join(evidence)):
+                for source, results in evidence.items():
+                    st.markdown(f"**{source}**")
+                    for result in dict.fromkeys(results):
+                        st.text(result, width="stretch")
 
-    api_key = setting("GOOGLE_API_KEY")
-    overview = f"{month:%B %Y} · {summary['confirmed_order_count']} confirmed orders\n"
-    if not submitted or assistant != "Sales" or not api_key or not answer.startswith(overview):
-        return
-
-    from google import genai
-    from google.genai import types
-
-    context = {"month": month.isoformat()[:7], "orders_through": snapshot["through"], **summary}
+def agent_reply(question, history, snapshot, month, mode, api_key, blocked):
+    if blocked:
+        return blocked, {}
+    if not api_key:
+        return "The AI assistant needs GOOGLE_API_KEY in Streamlit Secrets. You can view the dashboard with Show all.", {}
+    if snapshot.get("configuration_required"):
+        return "The sales source needs area assignments and order details. Contact your administrator.", {}
+    if not snapshot["rows"] or (snapshot["role"] == "salesperson" and not snapshot["rows"][0]["area"]):
+        return "There is no sales area or team assigned to this account. Contact your administrator.", {}
     try:
-        with st.spinner("Preparing an answer…"):
-            with genai.Client(
-                api_key=api_key, vertexai=False, http_options=types.HttpOptions(timeout=15000)
-            ) as client:
-                response = client.models.generate_content(
-                    model=setting("GEMINI_MODEL", "gemini-3.8-flash"),
-                    contents=json.dumps({"sales_summary": context, "task": "Summarize progress against target."}),
-                    config=types.GenerateContentConfig(
-                        system_instruction=(
-                            "Answer briefly using only sales_summary. Use its exact figures. "
-                            "A dash means the figure is unavailable. For requests beyond the supplied "
-                            "totals, explain what information is available. Do not invent figures."
-                        ),
-                        max_output_tokens=800,
-                    ),
-                )
-        if response.text:
-            with st.expander("Gemini summary"):
-                st.text(response.text)
+        from enterprise_agents import MODEL, coordinate
+
+        summary = sales_summary(sales_totals(snapshot["rows"]))
+        with st.spinner("Consulting the specialists…"):
+            return asyncio.run(coordinate(
+                question, history, snapshot, summary, month, mode, money, api_key, setting("GEMINI_MODEL", MODEL)
+            ))
     except Exception as error:
-        LOGGER.warning("Sales assistant failed (%s)", type(error).__name__)
-        st.warning("The AI assistant is temporarily unavailable.")
+        LOGGER.warning("Sales coordinator failed (%s)", type(error).__name__)
+        return "The AI assistant is temporarily unavailable. Try again, or use Show all to view your figures.", {}
 
 
 def main() -> None:
@@ -283,14 +272,16 @@ def main() -> None:
     st.sidebar.button("Refresh figures", width="stretch")
 
     scope = (mode, code, email, month)
-    submitted = st.session_state.pop("sales_request_submitted", False)
-    saved = st.session_state.get("sales_request")
-    if saved and saved[0] != scope:
-        del st.session_state["sales_request"]
-        saved = None
-    active_question = saved[1] if saved else ""
+    saved_scope, history = st.session_state.get("sales_chat", (None, []))
+    if saved_scope != scope:
+        history = []
+        st.session_state["sales_chat"] = (scope, history)
+    pending_scope, pending_question = st.session_state.pop("sales_pending_question", (None, ""))
+    question = pending_question if pending_scope == scope else ""
+    blocked = guardrail_message(question) if question else ""
+    api_key = setting("GOOGLE_API_KEY")
     show_all = st.session_state.get("sales_show_all", False)
-    include_data = bool(active_question or show_all)
+    include_data = bool(show_all or (question and api_key and not blocked))
 
     try:
         with st.spinner("Loading figures…" if include_data else "Checking staff access…"):
@@ -300,19 +291,25 @@ def main() -> None:
         st.error("Sales figures are unavailable. Try refreshing or contact your administrator.")
         st.stop()
     if not snapshot["authorized"]:
-        st.session_state.pop("sales_request", None)
+        st.session_state.pop("sales_chat", None)
         st.error("This staff ID could not be validated for your account. Check the ID or switch users.")
         st.stop()
-    request_controls(scope)
+    display_chat(scope, history)
+    if question:
+        user_entry = {"role": "user", "text": question}
+        render_message(user_entry)
+        answer, evidence = agent_reply(question, history, snapshot, month, mode, api_key, blocked)
+        assistant_entry = {"role": "assistant", "text": answer, "evidence": evidence}
+        render_message(assistant_entry)
+        st.session_state["sales_chat"] = (scope, [*history, user_entry, assistant_entry][-20:])
+    manager = snapshot.get("role") == "sales_manager"
+    if snapshot.get("name"):
+        st.sidebar.text(snapshot["name"])
+        st.sidebar.caption(f"{'Sales manager' if manager else 'Salesperson'} · {code}")
+    if not show_all:
+        return
     if snapshot.get("configuration_required"):
         st.error("The sales data source needs area assignments and order details before it can show these figures.")
-        return
-    manager = snapshot["role"] == "sales_manager"
-    st.sidebar.text(snapshot["name"])
-    st.sidebar.caption(f"{'Sales manager' if manager else 'Salesperson'} · {code}")
-    if submitted and not active_question:
-        st.warning("Enter a question to continue.")
-    if not include_data:
         return
 
     rows = snapshot["rows"]
@@ -324,11 +321,6 @@ def main() -> None:
         return
     totals = sales_totals(rows)
     summary = sales_summary(totals)
-    if active_question:
-        display_answer(active_question, snapshot, summary, month, mode, submitted)
-    if not show_all:
-        return
-
     through = date.fromisoformat(snapshot["through"]).strftime("%d %b %Y")
     st.caption(f"{month:%B %Y} · Order date cutoff {through} · Malaysia time")
     if mode == "live":
