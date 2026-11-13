@@ -152,11 +152,14 @@ def hr_answer(rows, mode, money):
     if mode != "demo":
         return "An approved commission policy has not been configured. Contact HR for the current policy."
     eligible = [row for row in rows if row["target_sen"] and row["ordered_sen"] >= row["target_sen"]]
+    eligible_sales = sum(row["ordered_sen"] for row in eligible)
     estimate = sum((row["ordered_sen"] * 2 + 50) // 100 for row in eligible)
     missing = sum(not row["target_sen"] for row in rows)
     answer = (
         "Sample policy · A salesperson earns 2% of their confirmed monthly order value once they reach "
         "100% of their own target. Pending and cancelled orders are excluded.\n"
+        f"Confirmed order value from Sales · {money(sum(row['ordered_sen'] for row in rows))}\n"
+        f"Commission-eligible order value · {money(eligible_sales)} ({len(eligible)} of {len(rows)} salespeople)\n"
         f"Sample commission for the visible scope · {money(estimate)}"
     )
     if missing:

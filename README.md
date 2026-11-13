@@ -59,15 +59,17 @@ Only orders with status `confirmed` count. The app sums confirmed orders through
 
 ## Assistants
 
-After signing in, type a question in **Ask an assistant**. You can ask follow-up questions in the same chat. Changing the staff account or reporting month starts a new chat. Turn on **Show all** to see the full dashboard with targets, team progress where applicable, and order lines. The dashboard works without an AI key.
+After signing in, type a question in **Ask an assistant**. You can ask follow-up questions in the same chat. Changing the staff account or reporting month starts a new chat. The dashboard below the chat shows targets, team progress where applicable, and order lines. It works without an AI key.
 
 - **Sales** answers questions about order totals and statuses, progress against target, customer breakdowns and sales invoices. Invoice values are the linked order amounts in this demo.
-- **HR** explains the sample commission policy and calculates the example amount for the visible salesperson or team. Live mode requires an approved policy before calculating commission.
+- **HR** asks the Sales specialist for confirmed order totals and individual targets for the selected month. It applies the sample commission policy and presents the eligible sales and estimated commission for the visible salesperson or team. Live mode requires an approved policy before calculating commission.
 - **Logistics** looks up POD status and reference by invoice number within the selected month and the user's access scope.
 
 The sidebar's **Suggested Questions** submit through the same chat and staff checks as typed questions. Ask Logistics for shipment milestones by invoice, order or tracking ID, current inventory by SKU or item, refunds, or return guidelines. The demo policy and records are fictional. A live snapshot can add the `shipments`, `shipment_events`, `order_refunds`, and `area_inventory` tables defined in `logistics_data.py`. Order-related records follow the selected month. Inventory is current for the viewer's areas. Live return policy requires an approved policy source.
 
 Ask “How much is this invoice and has it been delivered?” with a visible invoice number to get the Sales and Logistics results together.
+
+Ask “Show a pie chart of confirmed sales by item category” or “Break down my orders by status” to see a chart in the reply. The slices show confirmed order value by category or order count by status for the selected month. Logistics can also chart invoice delivery or refund statuses.
 
 ### ADK coordinator
 

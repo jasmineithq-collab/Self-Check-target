@@ -38,7 +38,6 @@ def staff_code(mode: str) -> str:
         if st.sidebar.button("Switch user", width="stretch"):
             del st.session_state["sales_staff_code"]
             clear_chat_history()
-            st.session_state.pop("sales_show_all", None)
             st.rerun()
         return code
 
@@ -245,7 +244,6 @@ def queue_suggestion(scope: tuple, question: str) -> None:
 def display_chat(scope: tuple, history: list[dict]) -> None:
     st.subheader("Ask an assistant")
     st.caption("Ask about shipments and POD, stock, refunds, returns, sales, or commission.")
-    st.toggle("Show all", key="sales_show_all", help="Show the full dashboard for the selected month.")
     for entry in history:
         render_message(entry)
     with st.container():
@@ -255,6 +253,8 @@ def display_chat(scope: tuple, history: list[dict]) -> None:
 def render_message(entry: dict) -> None:
     with st.chat_message(entry["role"]):
         st.text(entry["text"], width="stretch")
+        for chart in entry.get("charts", []):
+            display_breakdown_chart(chart)
         if "usage" in entry:
             display_answer_usage(entry["usage"], entry["usage_complete"])
         if evidence := entry.get("evidence"):
@@ -263,6 +263,26 @@ def render_message(entry: dict) -> None:
                     st.markdown(f"**{source}**")
                     for result in dict.fromkeys(results):
                         st.text(result, width="stretch")
+
+
+def display_breakdown_chart(chart: dict) -> None:
+    spec = {
+        "data": {"values": chart["slices"]},
+        "title": {"text": chart["title"], "anchor": "start"},
+        "height": 225,
+        "mark": {"type": "arc", "tooltip": True},
+        "encoding": {
+            "theta": {"field": "value", "type": "quantitative"},
+            "color": {"field": "label", "type": "nominal", "title": chart["group_label"],
+                      "legend": {"orient": "bottom", "columns": 2}},
+            "tooltip": [
+                {"field": "label", "type": "nominal", "title": chart["group_label"]},
+                {"field": "display_value", "type": "nominal", "title": chart["measure"]},
+                {"field": "share", "type": "quantitative", "title": "Share of total", "format": ".1%"},
+            ],
+        },
+    }
+    st.vega_lite_chart(spec, width="stretch", alt=chart["title"])
 
 def display_answer_usage(records: list[dict], complete: bool) -> None:
     if not records:
@@ -296,11 +316,11 @@ def display_answer_usage(records: list[dict], complete: bool) -> None:
     st.caption(" · ".join(parts))
 
 
-def agent_reply(question, history, snapshot, month, mode, api_key, blocked, usage_records):
+def agent_reply(question, history, snapshot, month, mode, api_key, blocked, usage_records, *, charts=None):
     if blocked:
         return blocked, {}, True
     if not api_key:
-        return "The AI assistant needs GOOGLE_API_KEY in Streamlit Secrets. You can view the dashboard with Show all.", {}, True
+        return "The AI assistant needs GOOGLE_API_KEY in Streamlit Secrets.", {}, True
     if snapshot.get("configuration_required"):
         return "The sales source needs area assignments and order details. Contact your administrator.", {}, True
     if not snapshot["rows"] or (snapshot["role"] == "salesperson" and not snapshot["rows"][0]["area"]):
@@ -312,12 +332,12 @@ def agent_reply(question, history, snapshot, month, mode, api_key, blocked, usag
         with st.spinner("Consulting the specialists…"):
             answer, evidence = asyncio.run(coordinate(
                 question, history, snapshot, summary, month, mode, money, api_key, setting("GEMINI_MODEL", MODEL),
-                usage_records=usage_records,
+                usage_records=usage_records, charts=charts,
             ))
         return answer, evidence, True
     except Exception as error:
         LOGGER.warning("Sales coordinator failed (%s)", type(error).__name__)
-        return "The AI assistant is temporarily unavailable. Try again, or use Show all to view your figures.", {}, False
+        return "The AI assistant is temporarily unavailable. Try again, or view your figures below.", {}, False
 
 
 def main() -> None:
@@ -355,12 +375,11 @@ def main() -> None:
     blocked = guardrail_message(question) if question else ""
     question = mask_pii(question)
     api_key = setting("GOOGLE_API_KEY")
-    show_all = st.session_state.get("sales_show_all", False)
-    include_data = bool(show_all or (question and api_key and not blocked))
+    include_policy = bool(question and api_key and not blocked)
 
     try:
-        with st.spinner("Loading figures…" if include_data else "Checking staff access…"):
-            snapshot = asyncio.run(fetch_snapshot(mode, email, code, month, include_data, bool(question and not blocked and api_key)))
+        with st.spinner("Loading figures…"):
+            snapshot = asyncio.run(fetch_snapshot(mode, email, code, month, include_data=True, include_policy=include_policy))
     except Exception as error:
         LOGGER.warning("Sales figures could not load (%s)", type(error).__name__)
         st.error("Sales figures are unavailable. Try refreshing or contact your administrator.")
@@ -374,9 +393,13 @@ def main() -> None:
         user_entry = {"role": "user", "text": question, "blocked": bool(blocked)}
         render_message(user_entry)
         usage_records = []
-        answer, evidence, usage_complete = agent_reply(question, history, snapshot, month, mode, api_key, blocked, usage_records)
+        charts = []
+        answer, evidence, usage_complete = agent_reply(
+            question, history, snapshot, month, mode, api_key, blocked, usage_records, charts=charts,
+        )
         assistant_entry = {"role": "assistant", "text": answer, "evidence": evidence, "blocked": bool(blocked),
-                           "usage": usage_records, "usage_complete": usage_complete}
+                           "usage": usage_records, "usage_complete": usage_complete,
+                           "charts": charts if usage_complete else []}
         render_message(assistant_entry)
         history = [*history, user_entry, assistant_entry][-20:]
         st.session_state["sales_chat"] = (scope, history)
@@ -386,8 +409,6 @@ def main() -> None:
     if snapshot.get("name"):
         st.sidebar.text(snapshot["name"])
         st.sidebar.caption(f"{'Sales manager' if manager else 'Salesperson'} · {code}")
-    if not show_all:
-        return
     if snapshot.get("configuration_required"):
         st.error("The sales data source needs area assignments and order details before it can show these figures.")
         return
